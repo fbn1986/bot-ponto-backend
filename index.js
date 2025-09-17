@@ -53,7 +53,7 @@ app.post('/webhook', async (req, res) => {
     if (command === 'entrada' || command === 'saída') {
       await addRecord(senderId, command);
       const horaCorreta = new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' });
-      replyText = `✅ Ponto de *${command}* registado com sucesso às ${horaCorreta}!`;
+      replyText = `✅ Ponto de *${command}* registrado com sucesso às ${horaCorreta}!`;
     } 
     else if (command.startsWith('relatório')) {
         replyText = await handleReportCommand(senderId, command);

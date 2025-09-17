@@ -4,9 +4,8 @@ const admin = require('firebase-admin');
 const axios = require('axios');
 
 // --- Configuração do Firebase ---
-// As suas variáveis de ambiente (secrets) já contêm o nome do ficheiro.
 const serviceAccount = require(`./${process.env.FIREBASE_SERVICE_ACCOUNT_FILE}`);
-const appId = 'default-app-id'; // Usar um ID estático ou de ambiente
+const appId = 'default-app-id';
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -51,10 +50,8 @@ app.post('/webhook', async (req, res) => {
     const command = messageBody.toLowerCase().trim();
     let replyText = 'Comando inválido. Por favor, envie "Entrada" ou "Saída".';
 
-    // Processamento dos comandos
     if (command === 'entrada' || command === 'saída') {
       await addRecord(senderId, command);
-      // ## CORREÇÃO DE FUSO HORÁRIO APLICADA AQUI ##
       const horaCorreta = new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' });
       replyText = `✅ Ponto de *${command}* registado com sucesso às ${horaCorreta}!`;
     } 
@@ -69,6 +66,10 @@ app.post('/webhook', async (req, res) => {
 
   } catch (error) {
     console.error('Erro ao processar o webhook:', error.message);
+    // Para depuração, pode adicionar mais detalhes se necessário
+    if (error.stack) {
+        console.error(error.stack);
+    }
   }
 
   res.sendStatus(200);
@@ -77,19 +78,12 @@ app.post('/webhook', async (req, res) => {
 
 // --- Funções de Comando ---
 
-async function addRecord(userId, type) {
-  const record = {
-    type: type,
-    timestamp: admin.firestore.FieldValue.serverTimestamp()
-  };
-  const collectionPath = `artifacts/${appId}/users/${userId}/registros_ponto`;
-  await db.collection(collectionPath).add(record);
-  console.log(`Registo de '${type}' guardado para o utilizador ${userId}`);
-}
-
 async function handleReportCommand(userId, command) {
     const tokens = command.split(' ');
     let startDate, endDate = new Date();
+
+    const hoje = new Date();
+    hoje.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
     if (tokens.includes('até')) {
         const dataInicioIndex = tokens.indexOf('relatório') + 1;
@@ -99,36 +93,32 @@ async function handleReportCommand(userId, command) {
     } else if (tokens.includes('últimos')) {
         const diasIndex = tokens.indexOf('dias') - 1;
         const dias = parseInt(tokens[diasIndex], 10);
-        startDate = new Date();
+        startDate = new Date(hoje);
         startDate.setDate(startDate.getDate() - (dias -1));
+        endDate = new Date(hoje);
     } else if (tokens.includes('ontem')) {
-        startDate = new Date();
+        startDate = new Date(hoje);
         startDate.setDate(startDate.getDate() - 1);
-        endDate = startDate;
-    } else { // Relatório de hoje por defeito
-        startDate = new Date();
-        endDate = new Date();
+        endDate = new Date(startDate);
+    } else { 
+        startDate = new Date(hoje);
+        endDate = new Date(hoje);
     }
     
     return generateReport(userId, startDate, endDate);
 }
 
-// --- Funções de Geração de Relatório e Dados Fictícios ---
 async function generateReport(userId, startDate, endDate) {
     startDate.setHours(0, 0, 0, 0);
     endDate.setHours(23, 59, 59, 999);
 
-    const { collection, query, where, orderBy, getDocs } = require('firebase/firestore');
-    const recordsRef = collection(db, `artifacts/${appId}/users/${userId}/registros_ponto`);
-
-    const q = query(
-        recordsRef,
-        where('timestamp', '>=', startDate),
-        where('timestamp', '<=', endDate),
-        orderBy('timestamp', 'asc')
-    );
-
-    const querySnapshot = await getDocs(q);
+    const recordsRef = db.collection(`artifacts/${appId}/users/${userId}/registros_ponto`);
+    const querySnapshot = await recordsRef
+        .where('timestamp', '>=', startDate)
+        .where('timestamp', '<=', endDate)
+        .orderBy('timestamp', 'asc')
+        .get();
+    
     const records = querySnapshot.docs.map(doc => doc.data());
     
     if (records.length === 0) {
@@ -147,7 +137,13 @@ async function generateReport(userId, startDate, endDate) {
     let totalPeriodMinutes = 0;
     let reportLines = [`*Relatório de Ponto - ${startDate.toLocaleDateString('pt-BR')} a ${endDate.toLocaleDateString('pt-BR')}*\n`];
 
-    Object.keys(dailyTotals).sort((a, b) => new Date(a.split('/').reverse().join('-')) - new Date(b.split('/').reverse().join('-'))).forEach(date => {
+    const sortedDates = Object.keys(dailyTotals).sort((a, b) => {
+        const [dayA, monthA, yearA] = a.split('/');
+        const [dayB, monthB, yearB] = b.split('/');
+        return new Date(`${yearA}-${monthA}-${dayA}`) - new Date(`${yearB}-${monthB}-${dayB}`);
+    });
+
+    sortedDates.forEach(date => {
         const dayRecords = dailyTotals[date];
         let dailyMinutes = 0;
         for (let i = 0; i < dayRecords.length; i += 2) {
@@ -170,18 +166,20 @@ async function generateReport(userId, startDate, endDate) {
 
 
 async function generateMockData(userId) {
-  const { collection, getDocs, doc, deleteDoc } = require('firebase/firestore');
-  const collectionRef = collection(db, `artifacts/${appId}/users/${userId}/registros_ponto`);
-  const snapshot = await getDocs(collectionRef);
-  for (const docSnap of snapshot.docs) {
-    await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/registros_ponto`, docSnap.id));
-  }
+  const collectionRef = db.collection(`artifacts/${appId}/users/${userId}/registros_ponto`);
+  const snapshot = await collectionRef.get();
+  
+  const batch = db.batch();
+  snapshot.docs.forEach(doc => {
+    batch.delete(doc.ref);
+  });
+  await batch.commit();
   
   const today = new Date();
   for (let i = 0; i < 7; i++) {
     let day = new Date();
     day.setDate(today.getDate() - i);
-    if (day.getDay() === 0 || day.getDay() === 6) continue; // Pular fins de semana
+    if (day.getDay() === 0 || day.getDay() === 6) continue;
 
     const entrada1 = new Date(day);
     entrada1.setHours(9, Math.floor(Math.random() * 10), 0, 0);
@@ -199,18 +197,16 @@ async function generateMockData(userId) {
     saida2.setHours(18, Math.floor(Math.random() * 10), 0, 0);
     await addRecord(userId, 'saída', saida2);
   }
-  return '✅ Dados fictícios gerados para os últimos 5 dias úteis! Tente "relatório últimos 7 dias" agora.';
+  return '✅ Dados fictícios gerados! Tente "relatório últimos 7 dias" agora.';
 }
 
-// Sobrescrever a função addRecord para aceitar uma data específica para os dados fictícios
 async function addRecord(userId, type, specificDate = null) {
-  const { collection, addDoc, serverTimestamp } = require('firebase/firestore');
   const record = {
     type: type,
-    timestamp: specificDate ? specificDate : serverTimestamp()
+    timestamp: specificDate ? specificDate : admin.firestore.FieldValue.serverTimestamp()
   };
   const collectionPath = `artifacts/${appId}/users/${userId}/registros_ponto`;
-  await addDoc(collection(db, collectionPath), record);
+  await db.collection(collectionPath).add(record);
   console.log(`Registo de '${type}' guardado para o utilizador ${userId}`);
 }
 
@@ -218,7 +214,7 @@ async function addRecord(userId, type, specificDate = null) {
 // --- Funções Auxiliares ---
 function parseDate(dateStr) {
     const [day, month, year] = dateStr.split('/');
-    return new Date(`${year}-${month}-${day}T12:00:00Z`);
+    return new Date(`${year}-${month}-${day}`);
 }
 
 function formatMinutes(minutes) {

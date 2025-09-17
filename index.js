@@ -4,8 +4,9 @@ const admin = require('firebase-admin');
 const axios = require('axios');
 
 // --- Configuração do Firebase ---
+// As suas variáveis de ambiente (secrets) já contêm o nome do ficheiro.
 const serviceAccount = require(`./${process.env.FIREBASE_SERVICE_ACCOUNT_FILE}`);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const appId = 'default-app-id'; // Usar um ID estático ou de ambiente
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -22,43 +23,46 @@ const PORT = process.env.PORT || 3000;
 
 // --- Rota Principal ---
 app.get('/', (req, res) => {
-  res.send('Servidor do Bot de Ponto está rodando! Configure o webhook para a rota /webhook.');
+  res.send('Servidor do Bot de Ponto está a rodar! Configure o webhook para a rota /webhook.');
 });
 
-// --- ROTA DO WEBHOOK (Onde a Evolution API vai enviar as mensagens) ---
+// --- ROTA DO WEBHOOK ---
 app.post('/webhook', async (req, res) => {
   console.log('Webhook recebido!');
-
+  
   try {
     if (req.body.event !== 'messages.upsert') {
+      console.log(`Evento ignorado: ${req.body.event}`);
       return res.sendStatus(200);
     }
+
+    console.log(JSON.stringify(req.body, null, 2));
 
     const messageData = req.body.data;
     const messageBody = messageData.message?.conversation;
     const sender = messageData.key?.remoteJid;
 
     if (!messageBody || !sender || messageData.key?.fromMe) {
+      console.log('Mensagem inválida, de mim, ou sem corpo/remetente.');
       return res.sendStatus(200);
     }
-
+    
     const senderId = sender.split('@')[0];
-    const commandParts = messageBody.toLowerCase().trim().split(' ');
-    const mainCommand = commandParts[0];
-    let replyText;
+    const command = messageBody.toLowerCase().trim();
+    let replyText = 'Comando inválido. Por favor, envie "Entrada" ou "Saída".';
 
-    if (mainCommand === 'entrada' || mainCommand === 'saída') {
-      await addRecord(senderId, mainCommand);
-      replyText = `✅ Ponto de *${mainCommand}* registrado com sucesso às ${new Date().toLocaleTimeString('pt-BR')}!`;
-    } else if (mainCommand === 'relatório') {
-      const params = commandParts.slice(1).join(' '); 
-      replyText = await handleReportRequest(senderId, params);
-    } else if (messageBody.toLowerCase().trim() === 'gerardadosficticios') {
-      // NOVO COMANDO SECRETO PARA GERAR DADOS
-      replyText = await generateMockData(senderId);
+    // Processamento dos comandos
+    if (command === 'entrada' || command === 'saída') {
+      await addRecord(senderId, command);
+      // ## CORREÇÃO DE FUSO HORÁRIO APLICADA AQUI ##
+      const horaCorreta = new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+      replyText = `✅ Ponto de *${command}* registado com sucesso às ${horaCorreta}!`;
+    } 
+    else if (command.startsWith('relatório')) {
+        replyText = await handleReportCommand(senderId, command);
     }
-    else {
-      replyText = 'Comando inválido. Exemplos:\n- Entrada\n- Saída\n- Relatório\n- Relatório últimos 7 dias\n- Relatório 01/09/2025 até 15/09/2025';
+    else if (command === 'gerardadosficticios') {
+        replyText = await generateMockData(senderId);
     }
 
     await sendReply(sender, replyText);
@@ -71,64 +75,7 @@ app.post('/webhook', async (req, res) => {
 });
 
 
-// --- Funções Auxiliares ---
-
-// NOVA FUNÇÃO: Gera dados de teste para os últimos 5 dias úteis
-async function generateMockData(userId) {
-    console.log(`Iniciando geração de dados fictícios para ${userId}`);
-    const collectionPath = `artifacts/${appId}/users/${userId}/registros_ponto`;
-    const batch = db.batch();
-
-    // 1. Limpa registros antigos do usuário
-    const snapshot = await db.collection(collectionPath).get();
-    if (!snapshot.empty) {
-        snapshot.docs.forEach(doc => {
-            batch.delete(doc.ref);
-        });
-        await batch.commit();
-        console.log(`Registros antigos de ${userId} foram limpos.`);
-    }
-
-    // 2. Gera novos registros para os últimos 5 dias
-    const newBatch = db.batch();
-    for (let i = 1; i <= 5; i++) {
-        const date = new Date();
-        date.setDate(date.getDate() - i);
-
-        // Pula Sábados (6) e Domingos (0)
-        if (date.getDay() === 0 || date.getDay() === 6) continue;
-
-        // Horários com pequena variação aleatória
-        const entrada1 = new Date(date);
-        entrada1.setHours(9, Math.floor(Math.random() * 10), 0, 0); // 09:00 - 09:09
-
-        const saida1 = new Date(date);
-        saida1.setHours(12, 30 + Math.floor(Math.random() * 10), 0, 0); // 12:30 - 12:39
-
-        const entrada2 = new Date(date);
-        entrada2.setHours(13, 30 + Math.floor(Math.random() * 10), 0, 0); // 13:30 - 13:39
-
-        const saida2 = new Date(date);
-        saida2.setHours(18, Math.floor(Math.random() * 10), 0, 0); // 18:00 - 18:09
-
-        const records = [
-            { type: 'entrada', timestamp: entrada1 },
-            { type: 'saída', timestamp: saida1 },
-            { type: 'entrada', timestamp: entrada2 },
-            { type: 'saída', timestamp: saida2 }
-        ];
-
-        records.forEach(record => {
-            const docRef = db.collection(collectionPath).doc(); // Cria uma nova referência de documento
-            newBatch.set(docRef, record);
-        });
-    }
-
-    await newBatch.commit();
-    console.log(`Dados fictícios gerados para ${userId}`);
-    return '🚀 Dados de teste para os últimos dias úteis foram gerados!\n\nExperimente agora:\n*- Relatório últimos 7 dias*';
-}
-
+// --- Funções de Comando ---
 
 async function addRecord(userId, type) {
   const record = {
@@ -137,125 +84,148 @@ async function addRecord(userId, type) {
   };
   const collectionPath = `artifacts/${appId}/users/${userId}/registros_ponto`;
   await db.collection(collectionPath).add(record);
-  console.log(`Registro de '${type}' salvo para o usuário ${userId}`);
+  console.log(`Registo de '${type}' guardado para o utilizador ${userId}`);
 }
 
-function parseDate(dateString) {
-    const parts = dateString.trim().split('/');
-    if (parts.length !== 3) return null;
-    const day = parseInt(parts[0], 10);
-    const month = parseInt(parts[1], 10) - 1;
-    const year = parseInt(parts[2], 10);
-    const date = new Date(year, month, day);
-    date.setHours(0, 0, 0, 0);
-    return date;
-}
+async function handleReportCommand(userId, command) {
+    const tokens = command.split(' ');
+    let startDate, endDate = new Date();
 
-async function handleReportRequest(userId, params) {
-    let startDate, endDate, reportTitle;
-
-    // Comando: relatório [data1] até [data2]
-    if (params.includes('até')) {
-        const dates = params.split('até');
-        startDate = parseDate(dates[0]);
-        endDate = parseDate(dates[1]);
-        if (!startDate || !endDate) return 'Formato de data inválido. Use: relatório DD/MM/AAAA até DD/MM/AAAA';
-        endDate.setDate(endDate.getDate() + 1); 
-        reportTitle = `de ${startDate.toLocaleDateString('pt-BR')} até ${endDate.toLocaleDateString('pt-BR')}`;
-
-    // Comando: relatório últimos X dias
-    } else if (params.startsWith('últimos')) {
-        const days = parseInt(params.split(' ')[1], 10);
-        if (isNaN(days)) return 'Comando inválido. Use: relatório últimos 7 dias';
-        endDate = new Date();
-        endDate.setHours(23, 59, 59, 999);
+    if (tokens.includes('até')) {
+        const dataInicioIndex = tokens.indexOf('relatório') + 1;
+        const dataFimIndex = tokens.indexOf('até') + 1;
+        startDate = parseDate(tokens[dataInicioIndex]);
+        endDate = parseDate(tokens[dataFimIndex]);
+    } else if (tokens.includes('últimos')) {
+        const diasIndex = tokens.indexOf('dias') - 1;
+        const dias = parseInt(tokens[diasIndex], 10);
         startDate = new Date();
-        startDate.setDate(startDate.getDate() - days + 1);
-        startDate.setHours(0, 0, 0, 0);
-        reportTitle = `dos Últimos ${days} Dias`;
-
-    // Comando: relatório ontem
-    } else if (params === 'ontem') {
+        startDate.setDate(startDate.getDate() - (dias -1));
+    } else if (tokens.includes('ontem')) {
         startDate = new Date();
         startDate.setDate(startDate.getDate() - 1);
-        startDate.setHours(0, 0, 0, 0);
-        endDate = new Date(startDate);
-        endDate.setDate(endDate.getDate() + 1);
-        reportTitle = 'de Ontem';
-
-    // Comando: relatório (hoje)
-    } else {
+        endDate = startDate;
+    } else { // Relatório de hoje por defeito
         startDate = new Date();
-        startDate.setHours(0, 0, 0, 0);
-        endDate = new Date(startDate);
-        endDate.setDate(endDate.getDate() + 1);
-        reportTitle = 'de Hoje';
+        endDate = new Date();
+    }
+    
+    return generateReport(userId, startDate, endDate);
+}
+
+// --- Funções de Geração de Relatório e Dados Fictícios ---
+async function generateReport(userId, startDate, endDate) {
+    startDate.setHours(0, 0, 0, 0);
+    endDate.setHours(23, 59, 59, 999);
+
+    const { collection, query, where, orderBy, getDocs } = require('firebase/firestore');
+    const recordsRef = collection(db, `artifacts/${appId}/users/${userId}/registros_ponto`);
+
+    const q = query(
+        recordsRef,
+        where('timestamp', '>=', startDate),
+        where('timestamp', '<=', endDate),
+        orderBy('timestamp', 'asc')
+    );
+
+    const querySnapshot = await getDocs(q);
+    const records = querySnapshot.docs.map(doc => doc.data());
+    
+    if (records.length === 0) {
+        return 'Nenhum registo encontrado para o período solicitado.';
     }
 
-    return generateReport(userId, startDate, endDate, reportTitle);
+    const dailyTotals = {};
+    records.forEach(record => {
+        const date = record.timestamp.toDate().toLocaleDateString('pt-BR', {timeZone: 'America/Sao_Paulo'});
+        if (!dailyTotals[date]) {
+            dailyTotals[date] = [];
+        }
+        dailyTotals[date].push(record);
+    });
+
+    let totalPeriodMinutes = 0;
+    let reportLines = [`*Relatório de Ponto - ${startDate.toLocaleDateString('pt-BR')} a ${endDate.toLocaleDateString('pt-BR')}*\n`];
+
+    Object.keys(dailyTotals).sort((a, b) => new Date(a.split('/').reverse().join('-')) - new Date(b.split('/').reverse().join('-'))).forEach(date => {
+        const dayRecords = dailyTotals[date];
+        let dailyMinutes = 0;
+        for (let i = 0; i < dayRecords.length; i += 2) {
+            const entry = dayRecords[i];
+            const exit = dayRecords[i + 1];
+            if (entry && entry.type === 'entrada' && exit && exit.type === 'saída') {
+                const diff = (exit.timestamp.toDate() - entry.timestamp.toDate()) / (1000 * 60);
+                dailyMinutes += diff;
+            }
+        }
+        if(dailyMinutes > 0){
+             reportLines.push(`- ${date}: *${formatMinutes(dailyMinutes)}*`);
+             totalPeriodMinutes += dailyMinutes;
+        }
+    });
+
+    reportLines.push(`\n*Total no Período:* ${formatMinutes(totalPeriodMinutes)}`);
+    return reportLines.join('\n');
 }
 
 
-async function generateReport(userId, startDate, endDate, reportTitle) {
+async function generateMockData(userId) {
+  const { collection, getDocs, doc, deleteDoc } = require('firebase/firestore');
+  const collectionRef = collection(db, `artifacts/${appId}/users/${userId}/registros_ponto`);
+  const snapshot = await getDocs(collectionRef);
+  for (const docSnap of snapshot.docs) {
+    await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/registros_ponto`, docSnap.id));
+  }
+  
+  const today = new Date();
+  for (let i = 0; i < 7; i++) {
+    let day = new Date();
+    day.setDate(today.getDate() - i);
+    if (day.getDay() === 0 || day.getDay() === 6) continue; // Pular fins de semana
+
+    const entrada1 = new Date(day);
+    entrada1.setHours(9, Math.floor(Math.random() * 10), 0, 0);
+    await addRecord(userId, 'entrada', entrada1);
+
+    const saida1 = new Date(day);
+    saida1.setHours(12, 30 + Math.floor(Math.random() * 10), 0, 0);
+    await addRecord(userId, 'saída', saida1);
+
+    const entrada2 = new Date(day);
+    entrada2.setHours(13, 30 + Math.floor(Math.random() * 10), 0, 0);
+    await addRecord(userId, 'entrada', entrada2);
+
+    const saida2 = new Date(day);
+    saida2.setHours(18, Math.floor(Math.random() * 10), 0, 0);
+    await addRecord(userId, 'saída', saida2);
+  }
+  return '✅ Dados fictícios gerados para os últimos 5 dias úteis! Tente "relatório últimos 7 dias" agora.';
+}
+
+// Sobrescrever a função addRecord para aceitar uma data específica para os dados fictícios
+async function addRecord(userId, type, specificDate = null) {
+  const { collection, addDoc, serverTimestamp } = require('firebase/firestore');
+  const record = {
+    type: type,
+    timestamp: specificDate ? specificDate : serverTimestamp()
+  };
   const collectionPath = `artifacts/${appId}/users/${userId}/registros_ponto`;
-
-  const snapshot = await db.collection(collectionPath)
-    .where('timestamp', '>=', startDate)
-    .where('timestamp', '<', endDate)
-    .get();
-
-  if (snapshot.empty) {
-    return `Você não tem nenhum registro de ponto para o período: ${reportTitle}.`;
-  }
-
-  const records = snapshot.docs.map(doc => doc.data()).sort((a, b) => a.timestamp.toMillis() - b.timestamp.toMillis());
-
-  // Agrupa os registros por dia
-  const dailyRecords = {};
-  records.forEach(record => {
-      const day = record.timestamp.toDate().toLocaleDateString('pt-BR');
-      if (!dailyRecords[day]) dailyRecords[day] = [];
-      dailyRecords[day].push(record);
-  });
-
-  let grandTotalMillis = 0;
-  let reportText = `📊 *Relatório ${reportTitle}*\n\n`;
-
-  // Itera sobre cada dia para calcular as horas
-  for (const day in dailyRecords) {
-      const dayRecords = dailyRecords[day];
-      let dailyTotalMillis = 0;
-      let lastEntrada = null;
-
-      dayRecords.forEach(record => {
-          if (record.type === 'entrada') {
-              lastEntrada = record.timestamp;
-          } else if (record.type === 'saída' && lastEntrada) {
-              dailyTotalMillis += record.timestamp.toMillis() - lastEntrada.toMillis();
-              lastEntrada = null;
-          }
-      });
-
-      if (dailyTotalMillis > 0) {
-          const hours = Math.floor(dailyTotalMillis / 3600000);
-          const minutes = Math.floor((dailyTotalMillis % 3600000) / 60000);
-          reportText += `*- ${day}:* ${hours}h e ${minutes}min\n`;
-          grandTotalMillis += dailyTotalMillis;
-      }
-  }
-
-  if (grandTotalMillis > 0) {
-    reportText += '\n';
-    const totalHours = Math.floor(grandTotalMillis / 3600000);
-    const totalMinutes = Math.floor((grandTotalMillis % 3600000) / 60000);
-    reportText += `*Total no período:* ${totalHours}h e ${totalMinutes}min`;
-  } else {
-      reportText += '*Nenhuma hora trabalhada registrada no período.*';
-  }
-
-  return reportText;
+  await addDoc(collection(db, collectionPath), record);
+  console.log(`Registo de '${type}' guardado para o utilizador ${userId}`);
 }
 
+
+// --- Funções Auxiliares ---
+function parseDate(dateStr) {
+    const [day, month, year] = dateStr.split('/');
+    return new Date(`${year}-${month}-${day}T12:00:00Z`);
+}
+
+function formatMinutes(minutes) {
+    const h = Math.floor(minutes / 60);
+    const m = Math.round(minutes % 60);
+    return `${String(h).padStart(2, '0')}h ${String(m).padStart(2, '0')}min`;
+}
 
 async function sendReply(to, text) {
   const apiUrl = process.env.EVOLUTION_API_URL;
@@ -263,9 +233,10 @@ async function sendReply(to, text) {
   const instanceName = process.env.EVOLUTION_INSTANCE_NAME;
 
   if (!apiUrl || !apiKey || !instanceName) {
+    console.error('As variáveis de ambiente da Evolution API não estão configuradas!');
     return;
   }
-
+  
   const sendMessageUrl = `${apiUrl}/message/sendText/${instanceName}`;
   const recipientNumber = to.split('@')[0];
 
@@ -273,21 +244,18 @@ async function sendReply(to, text) {
     await axios.post(sendMessageUrl, {
       number: recipientNumber,
       options: { delay: 1200, presence: "composing" },
-      text: text
+      textMessage: { text: text }
     }, {
       headers: { 'apikey': apiKey, 'Content-Type': 'application/json' }
     });
     console.log(`Resposta enviada para ${to}`);
   } catch (error) {
-    if (error.response) {
-      console.error('Erro detalhado da Evolution API:', JSON.stringify(error.response.data, null, 2));
-    } else {
-      console.error('Erro ao enviar resposta via Evolution API:', error.message);
-    }
+     console.error('Erro detalhado da Evolution API:', JSON.stringify(error.response?.data, null, 2));
   }
 }
 
 // --- Inicia o Servidor ---
 app.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
+  console.log(`Servidor a rodar na porta ${PORT}`);
 });
+

@@ -66,7 +66,6 @@ app.post('/webhook', async (req, res) => {
 
   } catch (error) {
     console.error('Erro ao processar o webhook:', error.message);
-    // Para depuração, pode adicionar mais detalhes se necessário
     if (error.stack) {
         console.error(error.stack);
     }
@@ -237,10 +236,11 @@ async function sendReply(to, text) {
   const recipientNumber = to.split('@')[0];
 
   try {
+    // CORREÇÃO APLICADA AQUI
     await axios.post(sendMessageUrl, {
       number: recipientNumber,
       options: { delay: 1200, presence: "composing" },
-      textMessage: { text: text }
+      text: text // Usar 'text' diretamente, e não 'textMessage'
     }, {
       headers: { 'apikey': apiKey, 'Content-Type': 'application/json' }
     });

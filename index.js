@@ -35,8 +35,6 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    console.log(JSON.stringify(req.body, null, 2));
-
     const messageData = req.body.data;
     const messageBody = messageData.message?.conversation;
     const sender = messageData.key?.remoteJid;
@@ -49,13 +47,21 @@ app.post('/webhook', async (req, res) => {
     const senderId = sender.split('@')[0];
     const command = messageBody.toLowerCase().trim();
     let replyText = 'Comando inválido. Por favor, envie "Entrada" ou "Saída".';
+    const horaCorreta = new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
-    if (command === 'entrada' || command === 'saída') {
-      await addRecord(senderId, command);
-      const horaCorreta = new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' });
-      replyText = `✅ Ponto de *${command}* registrado com sucesso às ${horaCorreta}!`;
-    } 
-    else if (command.startsWith('relatório')) {
+    if (command === 'entrada') {
+      await addRecord(senderId, 'entrada');
+      replyText = `✅ Ponto de *entrada* registado com sucesso às ${horaCorreta}!`;
+    
+    } else if (command === 'saída') {
+        await addRecord(senderId, 'saída');
+        const duracao = await calcularUltimoExpediente(senderId);
+        replyText = `✅ Ponto de *saída* registado com sucesso às ${horaCorreta}!`;
+        if (duracao) {
+            replyText += `\nDuração do expediente: *${duracao}*`;
+        }
+
+    } else if (command.startsWith('relatório')) {
         replyText = await handleReportCommand(senderId, command);
     }
     else if (command === 'gerardadosficticios') {
@@ -209,6 +215,41 @@ async function addRecord(userId, type, specificDate = null) {
   console.log(`Registo de '${type}' guardado para o utilizador ${userId}`);
 }
 
+async function calcularUltimoExpediente(userId) {
+  try {
+    const agora = new Date();
+    const inicioDoDia = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate(), 0, 0, 0);
+
+    const collectionPath = `artifacts/${appId}/users/${userId}/registros_ponto`;
+    const recordsRef = db.collection(collectionPath);
+    
+    const q = recordsRef
+      .where('timestamp', '>=', inicioDoDia)
+      .orderBy('timestamp', 'desc');
+
+    const snapshot = await q.get();
+
+    if (snapshot.empty) {
+      return null;
+    }
+    
+    const registosDeHoje = snapshot.docs.map(doc => doc.data());
+    
+    // O primeiro registo é a saída que acabámos de adicionar. O segundo deve ser a última entrada.
+    if (registosDeHoje.length > 1 && registosDeHoje[0].type === 'saída' && registosDeHoje[1].type === 'entrada') {
+        const ultimaSaida = registosDeHoje[0].timestamp.toDate();
+        const ultimaEntrada = registosDeHoje[1].timestamp.toDate();
+        const diffEmMinutos = (ultimaSaida - ultimaEntrada) / (1000 * 60);
+        return formatMinutes(diffEmMinutos);
+    }
+    
+    return null;
+
+  } catch (error) {
+    console.error("Erro ao calcular a duração do expediente:", error);
+    return null;
+  }
+}
 
 // --- Funções Auxiliares ---
 function parseDate(dateStr) {
@@ -217,6 +258,7 @@ function parseDate(dateStr) {
 }
 
 function formatMinutes(minutes) {
+    if (isNaN(minutes)) return '--:--';
     const h = Math.floor(minutes / 60);
     const m = Math.round(minutes % 60);
     return `${String(h).padStart(2, '0')}h ${String(m).padStart(2, '0')}min`;
@@ -236,11 +278,10 @@ async function sendReply(to, text) {
   const recipientNumber = to.split('@')[0];
 
   try {
-    // CORREÇÃO APLICADA AQUI
     await axios.post(sendMessageUrl, {
       number: recipientNumber,
       options: { delay: 1200, presence: "composing" },
-      text: text // Usar 'text' diretamente, e não 'textMessage'
+      text: text
     }, {
       headers: { 'apikey': apiKey, 'Content-Type': 'application/json' }
     });
